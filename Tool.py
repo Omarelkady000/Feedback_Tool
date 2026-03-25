@@ -1,17 +1,14 @@
+import streamlit as st
 import re
 import requests
-import tkinter as tk
-from tkinter import messagebox, filedialog, ttk
-import os
 import math
 
-# Updated Map: Clean mappings for Premiere XML
+# --- LOGIC (EXACTLY AS YOUR V4.5) ---
 XML_TIMEBASE_MAP = {
     "10.00 fps": "10", "12.00 fps": "12", "15.00 fps": "15",
     "23.976 fps": "24", "24.00 fps": "24", "25.00 fps": "25", "29.97 fps": "30",
     "30.00 fps": "30", "50.00 fps": "50", "59.94 fps": "60", "60.00 fps": "60"
 }
-
 
 def tc_to_frames(tc, fps_choice):
     clean_tc = tc.replace(';', ':')
@@ -34,93 +31,80 @@ def tc_to_frames(tc, fps_choice):
             base = float(fps_choice.split(' ')[0])
         return math.floor((h * 3600 * base) + (m * 60 * base) + (s * base) + f)
 
+# --- WEB INTERFACE ---
+st.set_page_config(page_title="Premiere Feedback Tool", page_icon="🎬")
+st.title("🎬 Premiere Feedback Tool")
+st.markdown("Convert Google Doc comments into Premiere Markers.")
 
-def run_tool():
-    url = url_entry.get().strip()
-    fps_choice = fps_combo.get()
-    timebase_value = XML_TIMEBASE_MAP.get(fps_choice, "30")
-    ntsc_value = "TRUE" if (".97" in fps_choice or ".94" in fps_choice) else "FALSE"
+# Replaces your Tkinter Entry and Combobox
+url = st.text_input("Google Doc URL:", placeholder="Paste link here...")
+fps_choice = st.selectbox("Select Premiere Timebase:", list(XML_TIMEBASE_MAP.keys()), index=6)
 
+# Replaces your Tkinter Button
+if st.button("GENERATE XML", type="primary"):
     if not url:
-        messagebox.showerror("Error", "Paste the Google Doc URL.")
-        return
+        st.error("Please paste the Google Doc URL.")
+    else:
+        try:
+            # Logic for export URL
+            export_url = url.split('/edit')[0] + '/export?format=txt' if "/edit" in url else url
+            
+            response = requests.get(export_url)
+            response.raise_for_status()
+            data = response.text
 
-    export_url = url.split('/edit')[0] + '/export?format=txt' if "/edit" in url else url
+            # Exact same Pattern from your v4.5
+            pattern = r"(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2})(?:\s*[–-]\s*(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2}))?([\s\S]+?)(?=\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2}|$)"
+            matches = list(re.finditer(pattern, data))
 
-    try:
-        response = requests.get(export_url)
-        response.raise_for_status()
-        data = response.text
-
-        # Pattern captures: Timecode1, optional Timecode2, and the full Comment
-        pattern = r"(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2})(?:\s*[–-]\s*(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2}))?([\s\S]+?)(?=\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2}|$)"
-        matches = list(re.finditer(pattern, data))
-
-        xml_header = f'<?xml version="1.0" encoding="UTF-8"?><xmeml version="4"><project><children><sequence><name>FEEDBACK_IMPORT</name><rate><timebase>{timebase_value}</timebase><ntsc>{ntsc_value}</ntsc></rate><media><video><format><samplecharacteristics><width>1920</width><height>1080</height></samplecharacteristics></format></video></media>'
-
-        xml_markers = ""
-        for m in matches:
-            start_tc = m.group(1)
-            end_tc = m.group(2)
-            comment_text = m.group(3).strip()
-
-            start_f = tc_to_frames(start_tc, fps_choice)
-
-            # --- THE SURGICAL FIX FOR "KEEP" ---
-            # Using Regex \b (word boundary) ensures we find 'keep' even in long paragraphs
-            # while ignoring words like 'keeper' or 'keeping'.
-            has_keep_word = bool(re.search(r'\bkeep\b', comment_text, re.IGNORECASE))
-
-            if has_keep_word:
-                # If 'keep' is mentioned anywhere, In and Out are identical
-                end_f = start_f
-            elif end_tc:
-                # If an explicit range was provided (00:01 - 00:05), use it
-                end_f = tc_to_frames(end_tc, fps_choice)
+            if not matches:
+                st.warning("No timecodes found. Ensure the Doc is set to 'Anyone with the link can view'.")
             else:
-                # Default duration of 10 frames
-                end_f = start_f
+                timebase_value = XML_TIMEBASE_MAP.get(fps_choice, "30")
+                ntsc_value = "TRUE" if (".97" in fps_choice or ".94" in fps_choice) else "FALSE"
 
-            clean_comment = comment_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                xml_header = f'<?xml version="1.0" encoding="UTF-8"?><xmeml version="4"><project><children><sequence><name>FEEDBACK_IMPORT</name><rate><timebase>{timebase_value}</timebase><ntsc>{ntsc_value}</ntsc></rate><media><video><format><samplecharacteristics><width>1920</width><height>1080</height></samplecharacteristics></format></video></media>'
 
-            xml_markers += f"""
-                <marker>
-                    <name>NOTE</name>
-                    <comment>{clean_comment}</comment>
-                    <in>{int(start_f)}</in>
-                    <out>{int(end_f)}</out>
-                </marker>"""
+                xml_markers = ""
+                for m in matches:
+                    start_tc = m.group(1)
+                    end_tc = m.group(2)
+                    comment_text = m.group(3).strip()
 
-        full_xml = xml_header + xml_markers + "</sequence></children></project></xmeml>"
+                    start_f = tc_to_frames(start_tc, fps_choice)
 
-        save_path = filedialog.asksaveasfilename(defaultextension=".xml",
-                                                 initialfile=f"Markers_{fps_choice.replace(' ', '_')}.xml")
-        if save_path:
-            with open(save_path, 'w', encoding='utf-8') as f:
-                f.write(full_xml)
-            messagebox.showinfo("Success", "XML Generated!")
+                    # --- THE SURGICAL FIX FOR "KEEP" ---
+                    has_keep_word = bool(re.search(r'\bkeep\b', comment_text, re.IGNORECASE))
 
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed: {str(e)}")
+                    if has_keep_word:
+                        end_f = start_f
+                    elif end_tc:
+                        end_f = tc_to_frames(end_tc, fps_choice)
+                    else:
+                        # Default is now same as start (Single frame) as per your last logic
+                        end_f = start_f
 
+                    clean_comment = comment_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-# --- GUI ---
-root = tk.Tk()
-root.title("Premiere Feedback Tool v4.5")
-root.geometry("500x250")
+                    xml_markers += f"""
+                        <marker>
+                            <name>NOTE</name>
+                            <comment>{clean_comment}</comment>
+                            <in>{int(start_f)}</in>
+                            <out>{int(end_f)}</out>
+                        </marker>"""
 
-tk.Label(root, text="Google Doc URL:", font=("Arial", 10, "bold")).pack(pady=10)
-url_entry = tk.Entry(root, width=60)
-url_entry.pack()
+                full_xml = xml_header + xml_markers + "</sequence></children></project></xmeml>"
 
-tk.Label(root, text="Select Premiere Timebase:", font=("Arial", 10, "bold")).pack(pady=10)
-fps_options = list(XML_TIMEBASE_MAP.keys())
-fps_combo = ttk.Combobox(root, values=fps_options, state="readonly", width=25)
-fps_combo.set("29.97 fps")
-fps_combo.pack()
+                st.success(f"Found {len(matches)} markers!")
+                
+                # Replaces your FileDialog
+                st.download_button(
+                    label="💾 Download XML for Premiere",
+                    data=full_xml,
+                    file_name=f"Markers_{fps_choice.replace(' ', '_')}.xml",
+                    mime="application/xml"
+                )
 
-btn = tk.Button(root, text="GENERATE XML", command=run_tool, bg="#21a366", fg="white", font=("Arial", 11, "bold"),
-                width=25)
-btn.pack(pady=20)
-
-root.mainloop()
+        except Exception as e:
+            st.error(f"Failed: {str(e)}")
