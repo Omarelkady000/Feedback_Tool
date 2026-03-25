@@ -3,7 +3,7 @@ import re
 import requests
 import math
 
-# --- LOGIC (EXACTLY AS YOUR V4.5) ---
+# --- LOGIC ---
 XML_TIMEBASE_MAP = {
     "10.00 fps": "10", "12.00 fps": "12", "15.00 fps": "15",
     "23.976 fps": "24", "24.00 fps": "24", "25.00 fps": "25", "29.97 fps": "30",
@@ -25,10 +25,7 @@ def tc_to_frames(tc, fps_choice):
         drop_frames = 4 * (total_minutes - (total_minutes // 10))
         return frame_number - drop_frames
     else:
-        if "23.976" in fps_choice:
-            base = 24
-        else:
-            base = float(fps_choice.split(' ')[0])
+        base = 24 if "23.976" in fps_choice else float(fps_choice.split(' ')[0])
         return math.floor((h * 3600 * base) + (m * 60 * base) + (s * base) + f)
 
 # --- WEB INTERFACE ---
@@ -36,24 +33,22 @@ st.set_page_config(page_title="Premiere Feedback Tool", page_icon="🎬")
 st.title("🎬 Premiere Feedback Tool")
 st.markdown("Convert Google Doc comments into Premiere Markers.")
 
-# Replaces your Tkinter Entry and Combobox
-url = st.text_input("Google Doc URL:", placeholder="Paste link here...")
-fps_choice = st.selectbox("Select Premiere Timebase:", list(XML_TIMEBASE_MAP.keys()), index=6)
+url = st.text_input("1. Google Doc URL:", placeholder="Paste link here...")
+fps_choice = st.selectbox("2. Select Premiere Timebase:", list(XML_TIMEBASE_MAP.keys()), index=6)
 
-# Replaces your Tkinter Button
+# --- THE FIX: ADD FILENAME INPUT HERE ---
+custom_filename = st.text_input("3. Custom Filename (Optional):", placeholder="e.g. My_Project_Markers")
+
 if st.button("GENERATE XML", type="primary"):
     if not url:
         st.error("Please paste the Google Doc URL.")
     else:
         try:
-            # Logic for export URL
             export_url = url.split('/edit')[0] + '/export?format=txt' if "/edit" in url else url
-            
             response = requests.get(export_url)
             response.raise_for_status()
             data = response.text
 
-            # Exact same Pattern from your v4.5
             pattern = r"(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2})(?:\s*[–-]\s*(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2}))?([\s\S]+?)(?=\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2}|$)"
             matches = list(re.finditer(pattern, data))
 
@@ -67,13 +62,8 @@ if st.button("GENERATE XML", type="primary"):
 
                 xml_markers = ""
                 for m in matches:
-                    start_tc = m.group(1)
-                    end_tc = m.group(2)
-                    comment_text = m.group(3).strip()
-
+                    start_tc, end_tc, comment_text = m.group(1), m.group(2), m.group(3).strip()
                     start_f = tc_to_frames(start_tc, fps_choice)
-
-                    # --- THE SURGICAL FIX FOR "KEEP" ---
                     has_keep_word = bool(re.search(r'\bkeep\b', comment_text, re.IGNORECASE))
 
                     if has_keep_word:
@@ -81,11 +71,9 @@ if st.button("GENERATE XML", type="primary"):
                     elif end_tc:
                         end_f = tc_to_frames(end_tc, fps_choice)
                     else:
-                        # Default is now same as start (Single frame) as per your last logic
                         end_f = start_f
 
                     clean_comment = comment_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
                     xml_markers += f"""
                         <marker>
                             <name>NOTE</name>
@@ -96,13 +84,22 @@ if st.button("GENERATE XML", type="primary"):
 
                 full_xml = xml_header + xml_markers + "</sequence></children></project></xmeml>"
 
+                # --- THE FIX: LOGIC FOR FILENAME ---
+                user_name = custom_filename.strip()
+                if not user_name:
+                    user_name = f"Markers_{fps_choice.replace(' ', '_')}"
+                
+                # Add .xml if they forgot it
+                if not user_name.lower().endswith(".xml"):
+                    user_name += ".xml"
+
                 st.success(f"Found {len(matches)} markers!")
                 
-                # Replaces your FileDialog
+                # Use the user_name variable here
                 st.download_button(
-                    label="💾 Download XML for Premiere",
+                    label=f"💾 Download {user_name}",
                     data=full_xml,
-                    file_name=f"Markers_{fps_choice.replace(' ', '_')}.xml",
+                    file_name=user_name,
                     mime="application/xml"
                 )
 
