@@ -1,107 +1,149 @@
 import streamlit as st
 import re
-import requests
 import math
+import csv
+import io
+from pathlib import Path
+from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 
-# --- LOGIC ---
+# --- 1. CONFIGURATION DATA ---
 XML_TIMEBASE_MAP = {
     "10.00 fps": "10", "12.00 fps": "12", "15.00 fps": "15",
     "23.976 fps": "24", "24.00 fps": "24", "25.00 fps": "25", "29.97 fps": "30",
     "30.00 fps": "30", "50.00 fps": "50", "59.94 fps": "60", "60.00 fps": "60"
 }
 
+# Added Resolution Mapping
+RES_MAP = {
+    "1080x1920 (Vertical HD)": (1080, 1920),
+    "1920x1080 (Landscape HD)": (1920, 1080),
+    "2160x3840 (Vertical 4K)": (2160, 3840),
+    "3840x2160 (Landscape 4K)": (3840, 2160),
+    "1080x1080 (Square)": (1080, 1080)
+}
+
 def tc_to_frames(tc, fps_choice):
-    clean_tc = tc.replace(';', ':')
-    parts = list(map(int, clean_tc.split(':')))
-    h, m, s, f = parts
-    total_minutes = (h * 60) + m
+    try:
+        clean_tc = tc.replace(';', ':')
+        parts = list(map(int, clean_tc.split(':')))
+        h, m, s, f = parts
+        total_minutes = (h * 60) + m
+        if "29.97" in fps_choice:
+            frame_number = ((total_minutes * 60) + s) * 30 + f
+            drop_frames = 2 * (total_minutes - (total_minutes // 10))
+            return frame_number - drop_frames
+        elif "59.94" in fps_choice:
+            frame_number = ((total_minutes * 60) + s) * 60 + f
+            drop_frames = 4 * (total_minutes - (total_minutes // 10))
+            return frame_number - drop_frames
+        else:
+            base = 24 if "23.976" in fps_choice else float(fps_choice.split(' ')[0])
+            return math.floor((h * 3600 * base) + (m * 60 * base) + (s * base) + f)
+    except: return 0
 
-    if "29.97" in fps_choice:
-        frame_number = ((total_minutes * 60) + s) * 30 + f
-        drop_frames = 2 * (total_minutes - (total_minutes // 10))
-        return frame_number - drop_frames
-    elif "59.94" in fps_choice:
-        frame_number = ((total_minutes * 60) + s) * 60 + f
-        drop_frames = 4 * (total_minutes - (total_minutes // 10))
-        return frame_number - drop_frames
-    else:
-        base = 24 if "23.976" in fps_choice else float(fps_choice.split(' ')[0])
-        return math.floor((h * 3600 * base) + (m * 60 * base) + (s * base) + f)
+def set_font(run, size=11, bold=False):
+    run.font.name = 'Arial'
+    run._element.rPr.rFonts.set(qn('w:ascii'), 'Arial')
+    run.font.size = Pt(size)
+    run.bold = bold
 
-# --- WEB INTERFACE ---
-st.set_page_config(page_title="Premiere Feedback Tool", page_icon="🎬")
-st.title("🎬 Premiere Feedback Tool")
-st.markdown("Convert Google Doc comments into Premiere Markers.")
+# --- 2. UI SETUP ---
+st.set_page_config(page_title="QOMY Feedback Tool", page_icon="🎬", layout="centered")
 
-url = st.text_input("1. Google Doc URL:", placeholder="Paste link here...")
-fps_choice = st.selectbox("2. Select Premiere Timebase:", list(XML_TIMEBASE_MAP.keys()), index=6)
+st.title("🎬 QOMY Feedback Tool")
+st.markdown("Upload your Premiere CSV to generate formatted Feedback Docs and XML Markers.")
 
-# --- THE FIX: ADD FILENAME INPUT HERE ---
-custom_filename = st.text_input("3. Custom Filename (Optional):", placeholder="e.g. My_Project_Markers")
+# Sidebar Settings
+st.sidebar.header("GLOBAL SETTINGS")
 
-if st.button("GENERATE XML", type="primary"):
-    if not url:
-        st.error("Please paste the Google Doc URL.")
-    else:
-        try:
-            export_url = url.split('/edit')[0] + '/export?format=txt' if "/edit" in url else url
-            response = requests.get(export_url)
-            response.raise_for_status()
-            data = response.text
+st.sidebar.write("Select Premiere Sequence FPS:")
+fps_choice = st.sidebar.selectbox("FPS Dropdown:", list(XML_TIMEBASE_MAP.keys()), index=6, label_visibility="collapsed")
 
-            pattern = r"(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2})(?:\s*[–-]\s*(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2}))?([\s\S]+?)(?=\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2}|$)"
-            matches = list(re.finditer(pattern, data))
+st.sidebar.write("Select Sequence Resolution:")
+res_choice = st.sidebar.selectbox("Resolution Dropdown:", list(RES_MAP.keys()), index=0, label_visibility="collapsed")
+width, height = RES_MAP[res_choice]
 
-            if not matches:
-                st.warning("No timecodes found. Ensure the Doc is set to 'Anyone with the link can view'.")
-            else:
-                timebase_value = XML_TIMEBASE_MAP.get(fps_choice, "30")
-                ntsc_value = "TRUE" if (".97" in fps_choice or ".94" in fps_choice) else "FALSE"
+# --- 3. WORKFLOW ---
+csv_file = st.file_uploader("Select Premiere CSV", type="csv")
+logo_file = st.file_uploader("Upload Logo (Optional)", type=["png", "jpg"])
 
-                xml_header = f'<?xml version="1.0" encoding="UTF-8"?><xmeml version="4"><project><children><sequence><name>FEEDBACK_IMPORT</name><rate><timebase>{timebase_value}</timebase><ntsc>{ntsc_value}</ntsc></rate><media><video><format><samplecharacteristics><width>1920</width><height>1080</height></samplecharacteristics></format></video></media>'
+if csv_file:
+    try:
+        raw_data = csv_file.read()
+        content = ""
+        for enc in ['utf-8-sig', 'utf-16', 'cp1252']:
+            try:
+                content = raw_data.decode(enc)
+                if "Marker Name" in content: break
+            except: continue
+        
+        dialect = csv.Sniffer().sniff(content[:2000])
+        reader = csv.DictReader(content.splitlines(), dialect=dialect)
+        
+        doc = Document()
+        
+        # 1. Logo
+        if logo_file:
+            doc.add_picture(io.BytesIO(logo_file.read()), width=Inches(1.5))
+            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # 2. Title Logic
+        base_name = Path(csv_file.name).stem
+        final_filename = f"{base_name}feedback" # Adjusted per request 1
+        
+        title_para = doc.add_heading('', 0)
+        title_run = title_para.add_run(base_name)
+        set_font(title_run, size=18, bold=True)
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-                xml_markers = ""
-                for m in matches:
-                    start_tc, end_tc, comment_text = m.group(1), m.group(2), m.group(3).strip()
-                    start_f = tc_to_frames(start_tc, fps_choice)
-                    has_keep_word = bool(re.search(r'\bkeep\b', comment_text, re.IGNORECASE))
+        xml_markers = ""
+        
+        for row in reader:
+            name = row.get('Marker Name', '').strip()
+            desc = row.get('Description', '').strip()
+            comment = name if len(name) >= len(desc) else desc
+            
+            in_tc = row.get('In', '00:00:00:00')
+            out_tc = row.get('Out', in_tc)
+            ts_display = in_tc if in_tc == out_tc else f"{in_tc} - {out_tc}"
+            
+            # Word Doc Paragraphs
+            p_ts = doc.add_paragraph()
+            run_ts = p_ts.add_run(ts_display)
+            set_font(run_ts, bold=True)
 
-                    if has_keep_word:
-                        end_f = start_f
-                    elif end_tc:
-                        end_f = tc_to_frames(end_tc, fps_choice)
-                    else:
-                        end_f = start_f
+            p_cmt = doc.add_paragraph()
+            run_cmt = p_cmt.add_run(comment)
+            set_font(run_cmt)
+            
+            # XML Logic
+            start_f = tc_to_frames(in_tc, fps_choice)
+            end_f = tc_to_frames(out_tc, fps_choice)
+            clean_cmt = comment.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            xml_markers += f"<marker><name>NOTE</name><comment>{clean_cmt}</comment><in>{int(start_f)}</in><out>{int(end_f)}</out></marker>"
 
-                    clean_comment = comment_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                    xml_markers += f"""
-                        <marker>
-                            <name>NOTE</name>
-                            <comment>{clean_comment}</comment>
-                            <in>{int(start_f)}</in>
-                            <out>{int(end_f)}</out>
-                        </marker>"""
+        # Prepare Buffers
+        doc_io = io.BytesIO()
+        doc.save(doc_io)
+        doc_io.seek(0)
+        
+        timebase = XML_TIMEBASE_MAP.get(fps_choice, "30")
+        ntsc = "TRUE" if (".97" in fps_choice or ".94" in fps_choice) else "FALSE"
+        
+        # Adjusted Sequence Name per request 1 and Resolution per request 2
+        full_xml = f'<?xml version="1.0" encoding="UTF-8"?><xmeml version="4"><project><children><sequence><name>{final_filename}</name><rate><timebase>{timebase}</timebase><ntsc>{ntsc}</ntsc></rate><media><video><format><samplecharacteristics><width>{width}</width><height>{height}</height></samplecharacteristics></format></video></media>{xml_markers}</sequence></children></project></xmeml>'
 
-                full_xml = xml_header + xml_markers + "</sequence></children></project></xmeml>"
+        st.divider()
+        st.success(f"Processed: {base_name}")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button("⬇️ Download Docx", data=doc_io, file_name=f"{final_filename}.docx")
+        with c2:
+            st.download_button("⬇️ Download XML", data=full_xml, file_name=f"{final_filename}.xml")
 
-                # --- THE FIX: LOGIC FOR FILENAME ---
-                user_name = custom_filename.strip()
-                if not user_name:
-                    user_name = f"Markers_{fps_choice.replace(' ', '_')}"
-                
-                # Add .xml if they forgot it
-                if not user_name.lower().endswith(".xml"):
-                    user_name += ".xml"
-
-                st.success(f"Found {len(matches)} markers!")
-                
-                # Use the user_name variable here
-                st.download_button(
-                    label=f"💾 Download {user_name}",
-                    data=full_xml,
-                    file_name=user_name,
-                    mime="application/xml"
-                )
-
-        except Exception as e:
-            st.error(f"Failed: {str(e)}")
+    except Exception as e:
+        st.error(f"Error: {e}")
